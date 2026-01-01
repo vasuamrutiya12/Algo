@@ -1,62 +1,67 @@
 # ==========================================================
-# AI POWERED LIVE PAPER TRADING SYSTEM (FINAL VERSION)
+# AI BASED NIFTY INTRADAY PAPER TRADING (KITE CONNECT)
 # ==========================================================
 
-import streamlit as st
-import yfinance as yf
+from kiteconnect import KiteConnect
 import pandas as pd
 import numpy as np
 import ta
 from xgboost import XGBClassifier
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 
-# ---------------- CONFIG ----------------
-SYMBOL = "^NSEI"
-INTERVAL = "5m"
-HISTORY_DAYS = "60d"
-CAPITAL_START = 10000
+# ===================== CONFIG =====================
+API_KEY = "cdtkozma3tyjs6rc"
+API_SECRET = "mk8sfb5yxtxwyyf8ydos37tl5tnjhhf6"
+
+SYMBOL = "NIFTY 50"
+TOKEN = 256265
+INTERVAL = "5minute"
+
+CAPITAL = 100000
+LOT_SIZE = 50
+RISK_PER_TRADE = 0.01
 SL_MULT = 1.2
 TP_MULT = 2.0
 
-# ---------------- SESSION INIT ----------------
-if "capital" not in st.session_state:
-    st.session_state.capital = CAPITAL_START
-if "position" not in st.session_state:
-    st.session_state.position = 0
-if "entry_price" not in st.session_state:
-    st.session_state.entry_price = 0.0
-if "trades" not in st.session_state:
-    st.session_state.trades = []
-if "model" not in st.session_state:
-    st.session_state.model = None
-if "initialized" not in st.session_state:
-    st.session_state.initialized = False
+# ===================== LOGIN =====================
+kite = KiteConnect(api_key=API_KEY)
+print("Login URL:", kite.login_url())
+request_token = input("Enter request token: ")
 
-# ---------------- LOAD DATA ----------------
-@st.cache_data
-def load_data():
-    df = yf.download(SYMBOL, period=HISTORY_DAYS, interval=INTERVAL)
-    df.columns = df.columns.get_level_values(0)
-    df.dropna(inplace=True)
+session = kite.generate_session(request_token, api_secret=API_SECRET)
+kite.set_access_token(session["access_token"])
+print("✅ Logged in successfully")
+
+# ===================== DATA FETCH =====================
+def get_data():
+    df = kite.historical_data(
+        instrument_token=TOKEN,
+        from_date=datetime.now() - timedelta(days=7),
+        to_date=datetime.now(),
+        interval=INTERVAL
+    )
+    df = pd.DataFrame(df)
+    df.set_index("date", inplace=True)
     return df
 
-# ---------------- FEATURE ENGINEERING ----------------
-def add_features(df):
-    if len(df) < 30:
-        return df
-    df["EMA20"] = ta.trend.ema_indicator(df["Close"], 20)
-    df["EMA50"] = ta.trend.ema_indicator(df["Close"], 50)
-    df["RSI"] = ta.momentum.rsi(df["Close"], 14)
-    df["ATR"] = ta.volatility.average_true_range(df["High"], df["Low"], df["Close"], 14)
-    df["RET"] = df["Close"].pct_change()
+# ===================== INDICATORS =====================
+def add_indicators(df):
+    df["EMA20"] = ta.trend.ema_indicator(df["close"], 20)
+    df["EMA50"] = ta.trend.ema_indicator(df["close"], 50)
+    df["RSI"] = ta.momentum.rsi(df["close"], 14)
+    df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], 14)
+    df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], 14)
+    df["RET"] = df["close"].pct_change()
     return df.dropna()
 
-# ---------------- TRAIN MODEL ----------------
+# ===================== ML TRAINING =====================
 def train_model(df):
-    df["TARGET"] = (df["Close"].shift(-3) > df["Close"]).astype(int)
+    df["TARGET"] = np.where(df["close"].shift(-3) > df["close"], 1, 0)
     df.dropna(inplace=True)
 
-    X = df[["EMA20", "EMA50", "RSI", "ATR", "RET"]]
+    features = ["EMA20", "EMA50", "RSI", "ATR", "RET"]
+    X = df[features]
     y = df["TARGET"]
 
     model = XGBClassifier(
@@ -67,77 +72,74 @@ def train_model(df):
         colsample_bytree=0.8,
         eval_metric="logloss"
     )
+
     model.fit(X, y)
-    return model
+    df["ML_PROB"] = model.predict_proba(X)[:, 1]
+    return df, model
 
-# ---------------- INITIALIZE MODEL ----------------
-df = load_data()
-df = add_features(df)
+# ===================== SIGNAL LOGIC =====================
+def get_signal(row):
+    if row["ADX"] > 25 and row["EMA20"] > row["EMA50"] and row["ML_PROB"] > 0.65:
+        return 1
+    elif row["ADX"] > 25 and row["EMA20"] < row["EMA50"] and row["ML_PROB"] < 0.35:
+        return -1
+    return 0
 
-if not st.session_state.initialized:
-    st.session_state.model = train_model(df)
-    st.session_state.initialized = True
+# ===================== PAPER TRADING ENGINE =====================
+capital = CAPITAL
+position = 0
+entry_price = 0
+trade_log = []
 
-# ---------------- LIVE DATA ----------------
-latest = df.iloc[-1]
+print("\n🚀 Bot Started...\n")
 
-X_live = latest[["EMA20", "EMA50", "RSI", "ATR", "RET"]].values.reshape(1, -1)
-prob = st.session_state.model.predict_proba(X_live)[0][1]
+while True:
+    try:
+        df = get_data()
+        df = add_indicators(df)
+        df, model = train_model(df)
 
-signal = 0
-if prob > 0.6 and latest["EMA20"] > latest["EMA50"]:
-    signal = 1
-elif prob < 0.4 and latest["EMA20"] < latest["EMA50"]:
-    signal = -1
+        row = df.iloc[-1]
+        signal = get_signal(row)
+        price = row["close"]
 
-# ---------------- TRADE EXECUTION ----------------
-if st.session_state.position == 0 and signal != 0:
-    st.session_state.entry_price = latest["Close"]
-    st.session_state.position = signal
+        # ENTRY
+        if position == 0 and signal != 0:
+            position = signal
+            entry_price = price
+            print(f"ENTRY @ {price} | {'BUY' if signal==1 else 'SELL'}")
 
-elif st.session_state.position != 0:
-    sl = latest["ATR"] * SL_MULT
-    tp = sl * TP_MULT
+        # EXIT LOGIC
+        if position != 0:
+            sl = row["ATR"] * SL_MULT
+            tp = row["ATR"] * TP_MULT
 
-    exit_cond = (
-        (latest["Close"] <= st.session_state.entry_price - sl) or
-        (latest["Close"] >= st.session_state.entry_price + tp)
-    )
+            exit_trade = False
 
-    if exit_cond:
-        pnl = (latest["Close"] - st.session_state.entry_price) * st.session_state.position
-        st.session_state.capital += pnl
+            if position == 1:
+                if price <= entry_price - sl or price >= entry_price + tp:
+                    exit_trade = True
+            else:
+                if price >= entry_price + sl or price <= entry_price - tp:
+                    exit_trade = True
 
-        st.session_state.trades.append({
-            "Time": datetime.now(),
-            "Side": "BUY" if st.session_state.position == 1 else "SELL",
-            "Entry": st.session_state.entry_price,
-            "Exit": latest["Close"],
-            "PnL": round(pnl, 2)
-        })
-        st.session_state.position = 0
+            if exit_trade:
+                pnl = (price - entry_price) * LOT_SIZE * position
+                capital += pnl
 
-# ---------------- DASHBOARD ----------------
-st.title("📊 AI Live Paper Trading Dashboard")
+                trade_log.append({
+                    "Time": datetime.now(),
+                    "Entry": entry_price,
+                    "Exit": price,
+                    "PnL": round(pnl, 2),
+                    "Capital": round(capital, 2)
+                })
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Capital", f"₹{st.session_state.capital:,.0f}")
-col2.metric("Open Position", st.session_state.position)
-col3.metric("Total Trades", len(st.session_state.trades))
+                print(f"EXIT @ {price} | PnL: {round(pnl,2)} | Capital: {capital}")
+                position = 0
 
-if st.session_state.trades:
-    trades_df = pd.DataFrame(st.session_state.trades)
+        time.sleep(300)
 
-    st.subheader("📜 Trade History")
-    st.dataframe(trades_df)
-
-    st.subheader("📈 Equity Curve")
-    st.line_chart(trades_df["PnL"].cumsum())
-
-    st.subheader("📊 Performance")
-    st.write("Win Rate:", round((trades_df["PnL"] > 0).mean() * 100, 2), "%")
-    st.write("Net Profit:", round(trades_df["PnL"].sum(), 2))
-else:
-    st.info("Waiting for first trade...")
-
-st.caption("⚡ Live paper trading system | Auto-updates every refresh")
+    except Exception as e:
+        print("ERROR:", e)
+        time.sleep(10)
