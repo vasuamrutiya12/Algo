@@ -14,7 +14,7 @@ from datetime import datetime
 SYMBOL = "^NSEI"
 INTERVAL = "5m"
 HISTORY_DAYS = "60d"
-CAPITAL_START = 100000
+CAPITAL_START = 10000
 SL_MULT = 1.2
 TP_MULT = 2.0
 
