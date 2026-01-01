@@ -1,5 +1,5 @@
 # ==========================================================
-# AI POWERED LIVE PAPER TRADING SYSTEM (FULL VERSION)
+# AI POWERED LIVE PAPER TRADING SYSTEM (FINAL VERSION)
 # ==========================================================
 
 import streamlit as st
@@ -10,15 +10,15 @@ import ta
 from xgboost import XGBClassifier
 from datetime import datetime
 
-# ------------------ CONFIG ------------------
+# ---------------- CONFIG ----------------
 SYMBOL = "^NSEI"
 INTERVAL = "5m"
 HISTORY_DAYS = "60d"
-CAPITAL_START = 10000
+CAPITAL_START = 100000
 SL_MULT = 1.2
 TP_MULT = 2.0
 
-# ------------------ SESSION INIT ------------------
+# ---------------- SESSION INIT ----------------
 if "capital" not in st.session_state:
     st.session_state.capital = CAPITAL_START
 if "position" not in st.session_state:
@@ -32,7 +32,7 @@ if "model" not in st.session_state:
 if "initialized" not in st.session_state:
     st.session_state.initialized = False
 
-# ------------------ DATA LOAD ------------------
+# ---------------- LOAD DATA ----------------
 @st.cache_data
 def load_data():
     df = yf.download(SYMBOL, period=HISTORY_DAYS, interval=INTERVAL)
@@ -40,8 +40,10 @@ def load_data():
     df.dropna(inplace=True)
     return df
 
-# ------------------ FEATURES ------------------
+# ---------------- FEATURE ENGINEERING ----------------
 def add_features(df):
+    if len(df) < 30:
+        return df
     df["EMA20"] = ta.trend.ema_indicator(df["Close"], 20)
     df["EMA50"] = ta.trend.ema_indicator(df["Close"], 50)
     df["RSI"] = ta.momentum.rsi(df["Close"], 14)
@@ -49,7 +51,7 @@ def add_features(df):
     df["RET"] = df["Close"].pct_change()
     return df.dropna()
 
-# ------------------ MODEL TRAIN ------------------
+# ---------------- TRAIN MODEL ----------------
 def train_model(df):
     df["TARGET"] = (df["Close"].shift(-3) > df["Close"]).astype(int)
     df.dropna(inplace=True)
@@ -68,17 +70,17 @@ def train_model(df):
     model.fit(X, y)
     return model
 
-# ------------------ INITIALIZE ------------------
+# ---------------- INITIALIZE MODEL ----------------
+df = load_data()
+df = add_features(df)
+
 if not st.session_state.initialized:
-    df = add_features(load_data())
     st.session_state.model = train_model(df)
     st.session_state.initialized = True
 
-# ------------------ LIVE DATA ------------------
-df = add_features(load_data())
+# ---------------- LIVE DATA ----------------
 latest = df.iloc[-1]
 
-# ------------------ SIGNAL LOGIC ------------------
 X_live = latest[["EMA20", "EMA50", "RSI", "ATR", "RET"]].values.reshape(1, -1)
 prob = st.session_state.model.predict_proba(X_live)[0][1]
 
@@ -88,7 +90,7 @@ if prob > 0.6 and latest["EMA20"] > latest["EMA50"]:
 elif prob < 0.4 and latest["EMA20"] < latest["EMA50"]:
     signal = -1
 
-# ------------------ TRADING LOGIC ------------------
+# ---------------- TRADE EXECUTION ----------------
 if st.session_state.position == 0 and signal != 0:
     st.session_state.entry_price = latest["Close"]
     st.session_state.position = signal
@@ -115,27 +117,27 @@ elif st.session_state.position != 0:
         })
         st.session_state.position = 0
 
-# ================= DASHBOARD =================
-st.title("📊 AI LIVE PAPER TRADING DASHBOARD")
+# ---------------- DASHBOARD ----------------
+st.title("📊 AI Live Paper Trading Dashboard")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Capital", f"₹{st.session_state.capital:,.0f}")
 col2.metric("Open Position", st.session_state.position)
-col3.metric("Trades", len(st.session_state.trades))
+col3.metric("Total Trades", len(st.session_state.trades))
 
 if st.session_state.trades:
-    df_trades = pd.DataFrame(st.session_state.trades)
+    trades_df = pd.DataFrame(st.session_state.trades)
 
-    st.subheader("📜 Trade Log")
-    st.dataframe(df_trades)
+    st.subheader("📜 Trade History")
+    st.dataframe(trades_df)
 
     st.subheader("📈 Equity Curve")
-    st.line_chart(df_trades["PnL"].cumsum())
+    st.line_chart(trades_df["PnL"].cumsum())
 
     st.subheader("📊 Performance")
-    st.write("Win Rate:", round((df_trades["PnL"] > 0).mean() * 100, 2), "%")
-    st.write("Net Profit:", round(df_trades["PnL"].sum(), 2))
+    st.write("Win Rate:", round((trades_df["PnL"] > 0).mean() * 100, 2), "%")
+    st.write("Net Profit:", round(trades_df["PnL"].sum(), 2))
 else:
-    st.info("Waiting for trades...")
+    st.info("Waiting for first trade...")
 
-st.caption("Live paper trading | Auto-refresh every reload")
+st.caption("⚡ Live paper trading system | Auto-updates every refresh")
